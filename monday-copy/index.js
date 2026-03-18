@@ -63,7 +63,7 @@ function buildColumnValues(columnValues, colTypeMap, srcBoardId, state) {
 
 // ── Main run function ──────────────────────────────────────────────────────────
 
-async function run({ sourceWorkspace, targetWorkspace, sourceToken, targetToken, dryRun, schemaOnly, itemLimit, saveState, loadState, log }) {
+async function run({ sourceWorkspace, targetWorkspace, sourceToken, targetToken, dryRun, schemaOnly, itemLimit, folderFilter, saveState, loadState, log }) {
   log = log || console.log;
 
   const sourceClient = new CopyClient(sourceToken, false);
@@ -74,7 +74,7 @@ async function run({ sourceWorkspace, targetWorkspace, sourceToken, targetToken,
   log(`[State] Loaded: ${Object.keys(state.boards).length} boards, ${Object.keys(state.items).length} items mapped`);
   state.save = () => saveState(state);
 
-  const sourceBoards = await reader.getWorkspaceBoards(sourceWorkspace);
+  const sourceBoards = await reader.getWorkspaceBoards(sourceWorkspace, folderFilter || null);
   if (sourceBoards.length === 0) { log('No boards found. Exiting.'); return; }
   log(`\nBoards to copy: ${sourceBoards.map(b => `"${b.name}"`).join(', ')}\n`);
 
@@ -401,7 +401,40 @@ async function run({ sourceWorkspace, targetWorkspace, sourceToken, targetToken,
         state.save();
       }
 
-      // (updates skipped — run separately if needed)
+      // ── Updates (comments) + file attachments ────────────────────────────
+      if (!dryRun && !state.updates[srcItemId]) {
+        try {
+          const updates = await reader.getItemUpdates(srcItemId);
+          // Copy in chronological order (API returns newest first)
+          for (const upd of [...updates].reverse()) {
+            const ts   = upd.created_at ? new Date(upd.created_at).toLocaleString() : '';
+            const who  = upd.creator ? upd.creator.name : 'Unknown';
+            const body = `**${who}** _(${ts})_\n\n${upd.body || ''}`;
+            let tgtUpd;
+            try {
+              tgtUpd = await targetClient.createUpdate(tgtItemId, body);
+            } catch (e) {
+              log(`      [update] WARN create: ${e.message.slice(0, 80)}`);
+              continue;
+            }
+            // Upload file attachments
+            for (const asset of (upd.assets || [])) {
+              try {
+                const buf = await reader.downloadAsset(asset.url, sourceToken);
+                await targetClient.uploadFileToUpdate(tgtUpd.id, buf, asset.name || 'file');
+                log(`      [file] "${asset.name}" → uploaded`);
+              } catch (e) {
+                log(`      [file] WARN "${asset.name}": ${e.message.slice(0, 80)}`);
+              }
+            }
+          }
+          if (updates.length > 0) log(`    [updates] ${updates.length} update(s) copied`);
+        } catch (e) {
+          log(`    [updates] WARN: ${e.message.slice(0, 80)}`);
+        }
+        state.updates[srcItemId] = true;
+        state.save();
+      }
     }
 
     log(`  [board] "${srcBoard.name}" — ${itemCount} items processed`);

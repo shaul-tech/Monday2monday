@@ -14,8 +14,32 @@ class MondayReader {
 
   // ── Workspace / Boards ────────────────────────────────────────────────────
 
-  async getWorkspaceBoards(workspaceId) {
-    this.log(`[Reader] Fetching boards in workspace ${workspaceId}...`);
+  async getWorkspaceBoards(workspaceId, folderId = null) {
+    const folderNote = folderId ? ` (folder ${folderId})` : '';
+    this.log(`[Reader] Fetching boards in workspace ${workspaceId}${folderNote}...`);
+
+    // If folder filter: use folders.children which returns boards directly
+    if (folderId) {
+      const folderData = await this.client.query(`
+        query($ids: [ID!]!) {
+          folders(ids: $ids) {
+            id name
+            children {
+              id name description board_kind
+              workspace { id name }
+              columns { id title type settings_str }
+              groups   { id title color position }
+            }
+          }
+        }
+      `, { ids: [String(folderId)] });
+      const folder = (folderData.folders || [])[0];
+      if (!folder) throw new Error(`Folder ${folderId} not found`);
+      const boards = (folder.children || []).filter(b => !b.name.toLowerCase().includes('subitems'));
+      this.log(`[Reader] Folder "${folder.name}": ${boards.length} boards`);
+      return boards;
+    }
+
     const all = [];
     let page = 1;
     while (true) {
@@ -35,7 +59,6 @@ class MondayReader {
       if (boards.length < 100) break;
       page++;
     }
-    // Filter out subitems boards (auto-created alongside parent boards)
     const nonSubitem = all.filter(b => !b.name.toLowerCase().includes('subitems'));
     this.log(`[Reader] Found ${all.length} boards (${nonSubitem.length} non-subitem)`);
     return nonSubitem;

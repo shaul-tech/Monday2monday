@@ -17,9 +17,10 @@ const TARGET_WORKSPACE = getArg('target-workspace');
 const DRY_RUN          = args.includes('--dry-run');
 const SCHEMA_ONLY      = args.includes('--schema-only');
 const ITEM_LIMIT       = getArg('limit') ? parseInt(getArg('limit'), 10) : null;
+const FOLDER_FILTER    = getArg('folder') || null;
 
 if (!SOURCE_WORKSPACE || !TARGET_WORKSPACE) {
-  console.error('Usage: node monday-copy.js --source-workspace=ID --target-workspace=ID [--dry-run] [--schema-only] [--limit=N]');
+  console.error('Usage: node run.js --source-workspace=ID --target-workspace=ID [--dry-run] [--schema-only] [--limit=N] [--folder=ID]');
   process.exit(1);
 }
 
@@ -36,9 +37,11 @@ const STATE_FILE = path.join(__dirname, 'monday-copy-state.json');
 
 function loadState() {
   try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    const s = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    if (!s.updates) s.updates = {};
+    return s;
   } catch {
-    return { boards: {}, groups: {}, columns: {}, items: {} };
+    return { boards: {}, groups: {}, columns: {}, items: {}, updates: {} };
   }
 }
 
@@ -52,6 +55,7 @@ const log = (...a) => console.log(...a);
 log(`\nMonday → Monday workspace copy`);
 log(`  Source workspace: ${SOURCE_WORKSPACE}`);
 log(`  Target workspace: ${TARGET_WORKSPACE}`);
+log(`  Folder filter:    ${FOLDER_FILTER || 'none (all boards)'}`);
 log(`  Dry run:          ${DRY_RUN}`);
 log(`  Schema only:      ${SCHEMA_ONLY}`);
 log(`  Item limit:       ${ITEM_LIMIT || 'none'}\n`);
@@ -64,6 +68,7 @@ run({
   dryRun:          DRY_RUN,
   schemaOnly:      SCHEMA_ONLY,
   itemLimit:       ITEM_LIMIT,
+  folderFilter:    FOLDER_FILTER,
   loadState,
   saveState,
   log,
