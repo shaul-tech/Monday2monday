@@ -73,6 +73,19 @@ class MondayReader {
   // ── Items (paginated) ─────────────────────────────────────────────────────
 
   /**
+   * Fetch ALL items for a board in one fast pass (no heavy work between pages).
+   * Use this instead of iterateBoardItems when processing per-item is slow
+   * (e.g. file uploads) to avoid Monday cursor expiry.
+   */
+  async getAllBoardItems(boardId) {
+    const all = [];
+    for await (const item of this.iterateBoardItems(boardId)) {
+      all.push(item);
+    }
+    return all;
+  }
+
+  /**
    * Async generator that yields items page by page.
    * Each item: { id, name, group { id }, column_values [{ id, value, text }],
    *              subitems [{ id, name, column_values }] }

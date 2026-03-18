@@ -392,7 +392,7 @@ async function run({ sourceWorkspace, targetWorkspace, sourceToken, targetToken,
     const tgtBoardId = state.boards[srcBoardId];
     if (!tgtBoardId) { log(`  [board] SKIP "${srcBoard.name}" — not in state`); continue; }
 
-    log(`\n  [board] "${srcBoard.name}" → copying items...`);
+    log(`\n  [board] "${srcBoard.name}" → fetching items...`);
 
     const colTypeMap = {};
     for (const col of (srcBoard.columns || [])) colTypeMap[col.id] = col.type;
@@ -404,8 +404,12 @@ async function run({ sourceWorkspace, targetWorkspace, sourceToken, targetToken,
     }
     const srcSubBoardId = srcSubBoard ? srcSubBoard.id : null;
 
+    // Collect all items first (fast pass) to avoid cursor expiry during slow processing
+    const allItems = await reader.getAllBoardItems(srcBoardId);
+    log(`  [board] "${srcBoard.name}" → ${allItems.length} items to process`);
+
     let itemCount = 0;
-    for await (const item of reader.iterateBoardItems(srcBoardId)) {
+    for (const item of allItems) {
       if (itemLimit && itemCount >= itemLimit) break;
       const srcItemId = item.id;
       itemCount++;
@@ -517,7 +521,8 @@ async function run({ sourceWorkspace, targetWorkspace, sourceToken, targetToken,
 
       log(`\n  [board] "${srcBoard.name}" → remapping board_relation values...`);
 
-      for await (const item of reader.iterateBoardItems(srcBoardId)) {
+      const boardItems = await reader.getAllBoardItems(srcBoardId);
+      for (const item of boardItems) {
         const tgtItemId = state.items[item.id];
         if (!tgtItemId) continue;
 
