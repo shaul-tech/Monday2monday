@@ -61,10 +61,42 @@ function buildColumnValues(columnValues, colTypeMap, srcBoardId, state) {
   return vals;
 }
 
+// ── Timing tracker ────────────────────────────────────────────────────────────
+
+class Timings {
+  constructor() { this._data = {}; }
+
+  async track(label, fn) {
+    const t0  = Date.now();
+    const res = await fn();
+    const ms  = Date.now() - t0;
+    if (!this._data[label]) this._data[label] = [];
+    this._data[label].push(ms);
+    return { result: res, ms };
+  }
+
+  summary(log) {
+    log('\n═══ Timing Summary ═══\n');
+    const pad = (s, n) => String(s).padEnd(n);
+    log(`  ${pad('Action', 28)} ${pad('Count', 7)} ${pad('Avg', 9)} ${pad('Min', 9)} ${pad('Max', 9)} Total`);
+    log(`  ${'-'.repeat(75)}`);
+    for (const [label, times] of Object.entries(this._data).sort((a, b) => a[0].localeCompare(b[0]))) {
+      const count = times.length;
+      const total = times.reduce((a, b) => a + b, 0);
+      const avg   = Math.round(total / count);
+      const min   = Math.min(...times);
+      const max   = Math.max(...times);
+      log(`  ${pad(label, 28)} ${pad(count, 7)} ${pad(avg + 'ms', 9)} ${pad(min + 'ms', 9)} ${pad(max + 'ms', 9)} ${Math.round(total / 1000)}s`);
+    }
+    log('');
+  }
+}
+
 // ── Main run function ──────────────────────────────────────────────────────────
 
 async function run({ sourceWorkspace, targetWorkspace, sourceToken, targetToken, dryRun, schemaOnly, itemLimit, folderFilter, saveState, loadState, log }) {
   log = log || console.log;
+  const T = new Timings();
 
   const sourceClient = new CopyClient(sourceToken, false);
   const targetClient = new CopyClient(targetToken, dryRun);
@@ -90,12 +122,17 @@ async function run({ sourceWorkspace, targetWorkspace, sourceToken, targetToken,
       log(`  [board] "${srcBoard.name}" → already mapped to ${state.boards[srcId]}`);
     } else {
       log(`  [board] Creating "${srcBoard.name}"...`);
-      const tgtBoardId = dryRun
-        ? `dry-${srcId}`
-        : await targetClient.createBoard(srcBoard.name, targetWorkspace, srcBoard.board_kind || 'public');
+      let tgtBoardId;
+      if (dryRun) {
+        tgtBoardId = `dry-${srcId}`;
+      } else {
+        const { result, ms } = await T.track('board_create', () =>
+          targetClient.createBoard(srcBoard.name, targetWorkspace, srcBoard.board_kind || 'public'));
+        tgtBoardId = result;
+        log(`  [board]   → ${tgtBoardId} (${ms}ms)`);
+      }
       state.boards[srcId] = tgtBoardId;
       state.save();
-      log(`  [board]   → ${tgtBoardId}`);
     }
 
     const tgtBoardId = state.boards[srcId];
@@ -103,19 +140,23 @@ async function run({ sourceWorkspace, targetWorkspace, sourceToken, targetToken,
     for (const grp of (srcBoard.groups || [])) {
       const grpKey = `${srcId}:${grp.id}`;
       if (state.groups[grpKey]) continue;
-      const tgtGrpId = dryRun
-        ? `dry-grp-${grp.id}`
-        : await targetClient.createGroup(tgtBoardId, grp.title);
+      let tgtGrpId;
+      if (dryRun) {
+        tgtGrpId = `dry-grp-${grp.id}`;
+      } else {
+        const { result, ms } = await T.track('group_create', () =>
+          targetClient.createGroup(tgtBoardId, grp.title));
+        tgtGrpId = result;
+        log(`  [group]  "${grp.title}" → ${tgtGrpId} (${ms}ms)`);
+      }
       state.groups[grpKey] = tgtGrpId;
       state.save();
-      log(`  [group]  "${grp.title}" → ${tgtGrpId}`);
     }
 
     for (const col of (srcBoard.columns || [])) {
       if (SKIP_CREATE_TYPES.has(col.type) || col.type === 'board_relation') continue;
       const colKey = `${srcId}:${col.id}`;
       if (state.columns[colKey]) continue;
-      log(`  [column] "${col.title}" (${col.type})...`);
       let tgtColId = null;
       if (dryRun) {
         tgtColId = `dry-col-${col.id}`;
@@ -123,7 +164,10 @@ async function run({ sourceWorkspace, targetWorkspace, sourceToken, targetToken,
         let defaults = null;
         if (col.settings_str) try { defaults = JSON.parse(col.settings_str); } catch {}
         try {
-          tgtColId = await targetClient.createColumn(tgtBoardId, col.title, col.type, defaults);
+          const { result, ms } = await T.track('column_create', () =>
+            targetClient.createColumn(tgtBoardId, col.title, col.type, defaults));
+          tgtColId = result;
+          log(`  [column] "${col.title}" (${col.type}) → ${tgtColId} (${ms}ms)`);
         } catch (e) {
           log(`  [column]   WARN: ${e.message}`);
         }
@@ -371,12 +415,15 @@ async function run({ sourceWorkspace, targetWorkspace, sourceToken, targetToken,
         const tgtGrpId = state.groups[grpKey] || null;
         const colVals  = buildColumnValues(item.column_values, colTypeMap, srcBoardId, state);
 
-        log(`    [item] "${item.name}"...`);
         let tgtItemId;
         if (dryRun) {
           tgtItemId = `dry-item-${srcItemId}`;
+          log(`    [item] "${item.name}"...`);
         } else {
-          tgtItemId = await targetClient.createItem(tgtBoardId, tgtGrpId, item.name, colVals);
+          const { result, ms } = await T.track('item_create', () =>
+            targetClient.createItem(tgtBoardId, tgtGrpId, item.name, colVals));
+          tgtItemId = result;
+          log(`    [item] "${item.name}" → ${tgtItemId} (${ms}ms)`);
         }
         state.items[srcItemId] = tgtItemId;
         state.save();
@@ -389,13 +436,15 @@ async function run({ sourceWorkspace, targetWorkspace, sourceToken, targetToken,
         const subColVals = srcSubBoardId
           ? buildColumnValues(sub.column_values, subColTypeMap, srcSubBoardId, state)
           : {};
-        log(`      [subitem] "${sub.name}"...`);
         let tgtSubId;
         if (dryRun) {
           tgtSubId = `dry-sub-${sub.id}`;
+          log(`      [subitem] "${sub.name}"...`);
         } else {
-          const result = await targetClient.createSubitem(tgtItemId, sub.name, subColVals);
+          const { result, ms } = await T.track('subitem_create', () =>
+            targetClient.createSubitem(tgtItemId, sub.name, subColVals));
           tgtSubId = result.id;
+          log(`      [subitem] "${sub.name}" → ${tgtSubId} (${ms}ms)`);
         }
         state.items[sub.id] = tgtSubId;
         state.save();
@@ -404,7 +453,10 @@ async function run({ sourceWorkspace, targetWorkspace, sourceToken, targetToken,
       // ── Updates (comments) + file attachments ────────────────────────────
       if (!dryRun && !state.updates[srcItemId]) {
         try {
-          const updates = await reader.getItemUpdates(srcItemId);
+          const { result: updates, ms: fetchMs } = await T.track('fetch_updates', () =>
+            reader.getItemUpdates(srcItemId));
+          if (updates.length > 0) log(`    [updates] fetched ${updates.length} update(s) (${fetchMs}ms)`);
+
           // Copy in chronological order (API returns newest first)
           for (const upd of [...updates].reverse()) {
             const ts   = upd.created_at ? new Date(upd.created_at).toLocaleString() : '';
@@ -412,7 +464,10 @@ async function run({ sourceWorkspace, targetWorkspace, sourceToken, targetToken,
             const body = `**${who}** _(${ts})_\n\n${upd.body || ''}`;
             let tgtUpd;
             try {
-              tgtUpd = await targetClient.createUpdate(tgtItemId, body);
+              const { result, ms } = await T.track('update_create', () =>
+                targetClient.createUpdate(tgtItemId, body));
+              tgtUpd = result;
+              log(`      [update] by ${who} → ${tgtUpd.id} (${ms}ms)`);
             } catch (e) {
               log(`      [update] WARN create: ${e.message.slice(0, 80)}`);
               continue;
@@ -420,15 +475,16 @@ async function run({ sourceWorkspace, targetWorkspace, sourceToken, targetToken,
             // Upload file attachments
             for (const asset of (upd.assets || [])) {
               try {
-                const buf = await reader.downloadAsset(asset.url, sourceToken);
-                await targetClient.uploadFileToUpdate(tgtUpd.id, buf, asset.name || 'file');
-                log(`      [file] "${asset.name}" → uploaded`);
+                const { result: buf, ms: dlMs } = await T.track('file_download', () =>
+                  reader.downloadAsset(asset.url, sourceToken));
+                const { ms: ulMs } = await T.track('file_upload', () =>
+                  targetClient.uploadFileToUpdate(tgtUpd.id, buf, asset.name || 'file'));
+                log(`      [file] "${asset.name}" dl:${dlMs}ms ul:${ulMs}ms`);
               } catch (e) {
                 log(`      [file] WARN "${asset.name}": ${e.message.slice(0, 80)}`);
               }
             }
           }
-          if (updates.length > 0) log(`    [updates] ${updates.length} update(s) copied`);
         } catch (e) {
           log(`    [updates] WARN: ${e.message.slice(0, 80)}`);
         }
@@ -481,8 +537,9 @@ async function run({ sourceWorkspace, targetWorkspace, sourceToken, targetToken,
 
             if (linkedPulseIds.length === 0) continue;
 
-            log(`    [relation] "${item.name}" [${srcColId}] → ${linkedPulseIds.length} link(s)`);
-            await targetClient.changeColumnValue(tgtBoardId, tgtItemId, tgtColId, { linkedPulseIds });
+            const { ms } = await T.track('board_relation_set', () =>
+              targetClient.changeColumnValue(tgtBoardId, tgtItemId, tgtColId, { linkedPulseIds }));
+            log(`    [relation] "${item.name}" [${srcColId}] → ${linkedPulseIds.length} link(s) (${ms}ms)`);
           } catch (e) {
             log(`    [relation] WARN: ${e.message}`);
           }
@@ -492,6 +549,8 @@ async function run({ sourceWorkspace, targetWorkspace, sourceToken, targetToken,
 
     log('\n[Phase 3] Done.\n');
   }
+
+  T.summary(log);
 }
 
 module.exports = { run };
